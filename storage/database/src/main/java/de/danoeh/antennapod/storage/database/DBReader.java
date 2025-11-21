@@ -11,8 +11,10 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import de.danoeh.antennapod.model.feed.Chapter;
 import de.danoeh.antennapod.model.feed.Feed;
@@ -222,12 +224,62 @@ public final class DBReader {
      * @return A list of FeedItems sorted by the same order as the queue.
      */
     @NonNull
+    /**
+     * Gets all unique tag names from feeds.
+     */
+    public static Set<String> getAllTagsFromFeeds() {
+        Set<String> tagNames = new HashSet<>();
+        List<NavDrawerData.TagItem> tagItems = getAllTags(Feed.STATE_SUBSCRIBED);
+        for (NavDrawerData.TagItem tagItem : tagItems) {
+            if (!FeedPreferences.TAG_ROOT.equals(tagItem.getTitle()) 
+                && !FeedPreferences.TAG_UNTAGGED.equals(tagItem.getTitle())) {
+                tagNames.add(tagItem.getTitle());
+            }
+        }
+        return tagNames;
+    }
+
+    /**
+     * Gets the active tag filters for the current active queue.
+     */
+    public static Set<String> getTagFiltersForActiveQueue() {
+        PodDBAdapter adapter = PodDBAdapter.getInstance();
+        adapter.open();
+        try {
+            long activeQueueId = adapter.getActiveQueueId();
+            return adapter.getTagFiltersForQueue(activeQueueId);
+        } finally {
+            adapter.close();
+        }
+    }
+
+    /**
+     * Loads the queue from the database without any filtering.
+     * Used for queue management operations to ensure all items are included.
+     */
     public static List<FeedItem> getQueue() {
+        Log.d(TAG, "getUnfilteredQueue() called");
+        PodDBAdapter adapter = PodDBAdapter.getInstance();
+        adapter.open();
+        try (FeedItemCursor cursor = new FeedItemCursor(adapter.getQueueCursor())) {
+            List<FeedItem> items = extractItemlistFromCursor(cursor);
+            loadAdditionalFeedItemListData(items);
+            return items;
+        } finally {
+            adapter.close();
+        }
+    }
+
+    /**
+     * Loads the queue from the database with tag filtering applied.
+     * Used for display purposes.
+     */
+    public static List<FeedItem> getFilteredQueue() {
         Log.d(TAG, "getQueue() called");
 
         PodDBAdapter adapter = PodDBAdapter.getInstance();
         adapter.open();
-        try (FeedItemCursor cursor = new FeedItemCursor(adapter.getQueueCursor())) {
+        try (FeedItemCursor cursor = new FeedItemCursor(adapter.getFilteredQueueCursor())) {
             List<FeedItem> items = extractItemlistFromCursor(cursor);
             loadAdditionalFeedItemListData(items);
             return items;

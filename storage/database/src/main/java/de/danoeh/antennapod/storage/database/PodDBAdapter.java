@@ -1,6 +1,7 @@
 package de.danoeh.antennapod.storage.database;
 
 import android.content.ContentValues;
+import android.content.ContentValues;
 import android.content.Context;
 import android.database.Cursor;
 import android.database.DatabaseErrorHandler;
@@ -26,6 +27,7 @@ import java.io.File;
 import java.io.IOException;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -123,6 +125,13 @@ public class PodDBAdapter {
     public static final String KEY_EPISODE_NOTIFICATION = "episode_notification";
     public static final String KEY_NEW_EPISODES_ACTION = "new_episodes_action";
     public static final String KEY_PODCASTINDEX_CHAPTER_URL = "podcastindex_chapter_url";
+
+    // Queue system keys
+    public static final String KEY_NAME = "name";
+    public static final String KEY_IS_ACTIVE = "is_active";
+    public static final String KEY_CREATED_DATE = "created_date";
+    public static final String KEY_QUEUE_NAME_ID = "queue_name_id";
+    public static final String KEY_TAG_NAME = "tag_name";
     public static final String KEY_SOCIAL_INTERACT_URL = "social_interact_url";
     public static final String KEY_STATE = "state";
     public static final String KEY_PODCASTINDEX_TRANSCRIPT_URL = "podcastindex_transcript_url";
@@ -135,6 +144,8 @@ public class PodDBAdapter {
     public static final String TABLE_NAME_FEED_MEDIA = "FeedMedia";
     public static final String TABLE_NAME_DOWNLOAD_LOG = "DownloadLog";
     public static final String TABLE_NAME_QUEUE = "Queue";
+    public static final String TABLE_NAME_QUEUE_NAME_LIST = "QueueNameList";
+    public static final String TABLE_NAME_TAG_FILTER = "TagFilter";
     public static final String TABLE_NAME_SIMPLECHAPTERS = "SimpleChapters";
     public static final String TABLE_NAME_FAVORITES = "Favorites";
 
@@ -214,7 +225,17 @@ public class PodDBAdapter {
 
     private static final String CREATE_TABLE_QUEUE = "CREATE TABLE "
             + TABLE_NAME_QUEUE + "(" + KEY_ID + " INTEGER PRIMARY KEY,"
-            + KEY_FEEDITEM + " INTEGER," + KEY_FEED + " INTEGER)";
+            + KEY_QUEUE_NAME_ID + " INTEGER DEFAULT 1," + KEY_FEEDITEM + " INTEGER," + KEY_FEED + " INTEGER,"
+            + "FOREIGN KEY(" + KEY_QUEUE_NAME_ID + ") REFERENCES " + TABLE_NAME_QUEUE_NAME_LIST + "(" + KEY_ID + "))";
+
+    private static final String CREATE_TABLE_QUEUE_NAME_LIST = "CREATE TABLE "
+            + TABLE_NAME_QUEUE_NAME_LIST + "(" + KEY_ID + " INTEGER PRIMARY KEY,"
+            + KEY_NAME + " TEXT," + KEY_IS_ACTIVE + " INTEGER DEFAULT 0," + KEY_CREATED_DATE + " INTEGER)";
+
+    private static final String CREATE_TABLE_TAG_FILTER = "CREATE TABLE "
+            + TABLE_NAME_TAG_FILTER + "(" + KEY_ID + " INTEGER PRIMARY KEY,"
+            + KEY_QUEUE_NAME_ID + " INTEGER," + KEY_TAG_NAME + " TEXT,"
+            + "FOREIGN KEY(" + KEY_QUEUE_NAME_ID + ") REFERENCES " + TABLE_NAME_QUEUE_NAME_LIST + "(" + KEY_ID + "))";
 
     private static final String CREATE_TABLE_SIMPLECHAPTERS = "CREATE TABLE "
             + TABLE_NAME_SIMPLECHAPTERS + " (" + TABLE_PRIMARY_KEY + KEY_TITLE
@@ -1066,8 +1087,104 @@ public class PodDBAdapter {
         return db.rawQuery(query, null);
     }
 
+    public final Cursor getFilteredQueueCursor() {
+        final String query = "SELECT " + KEYS_FEED_ITEM_WITHOUT_DESCRIPTION + ", " + KEYS_FEED_MEDIA
+                + " FROM " + TABLE_NAME_QUEUE
+                + " INNER JOIN " + TABLE_NAME_FEED_ITEMS
+                + " ON " + SELECT_KEY_ITEM_ID + " = " + TABLE_NAME_QUEUE + "." + KEY_FEEDITEM
+                +  JOIN_FEED_ITEM_AND_MEDIA
+                + getQueueFilterClause()
+                + " ORDER BY " + TABLE_NAME_QUEUE + "." + KEY_ID;
+        return db.rawQuery(query, null);
+    }
+
+    private String getQueueFilterClause() {
+        // Check if active queue has tag filters
+        long activeQueueId = getActiveQueueId();
+        Set<String> tagFilters = getTagFiltersForQueue(activeQueueId);
+
+        Log.d("QueueFilter", "Active queue ID: " + activeQueueId);
+        Log.d("QueueFilter", "Tag filters: " + tagFilters);
+
+        // Debug: Check what tags actually exist in the database
+        try (Cursor cursor = db.rawQuery("SELECT id, title, tags FROM " + TABLE_NAME_FEEDS + " WHERE tags IS NOT NULL AND tags != ''", null)) {
+            while (cursor.moveToNext()) {
+                Log.d("QueueFilter", "Feed " + cursor.getLong(0) + " (" + cursor.getString(1) + ") has tags: [" + cursor.getString(2) + "]");
+            }
+        }
+
+        if (tagFilters.isEmpty()) {
+            // No tag filters - show all queue items
+            String clause = " WHERE 1=1";
+            Log.d("QueueFilter", "No filters, clause: " + clause);
+            return clause;
+        }
+
+        // Build tag filter clause - only filter by tags, don't touch Queue table
+        StringBuilder filterClause = new StringBuilder();
+        filterClause.append(" WHERE " + TABLE_NAME_FEED_ITEMS + "." + KEY_FEED + " IN (");
+        filterClause.append("SELECT " + KEY_ID + " FROM " + TABLE_NAME_FEEDS + " WHERE ");
+
+        boolean first = true;
+        for (String tag : tagFilters) {
+            if (!first) filterClause.append(" OR ");  // Back to OR logic
+            // Try multiple tag matching patterns
+            filterClause.append("(");
+            filterClause.append(KEY_FEED_TAGS + " LIKE '%" + tag + "%'");
+            filterClause.append(" OR " + KEY_FEED_TAGS + " LIKE '%\"" + tag + "\"%'");
+            filterClause.append(" OR " + KEY_FEED_TAGS + " LIKE '%[" + tag + "]%'");
+            filterClause.append(")");
+            first = false;
+        }
+        filterClause.append(")");
+
+        String finalClause = filterClause.toString();
+        Log.d("QueueFilter", "Final filter clause: " + finalClause);
+        return finalClause;
+    }
+
     public Cursor getQueueIDCursor() {
         return db.query(TABLE_NAME_QUEUE, new String[]{KEY_FEEDITEM}, null, null, null, null, KEY_ID + " ASC", null);
+    }
+
+    public long getActiveQueueId() {
+        try (Cursor cursor = db.query(TABLE_NAME_QUEUE_NAME_LIST, new String[]{KEY_ID},
+                KEY_IS_ACTIVE + "=1", null, null, null, null, "1")) {
+            if (cursor.moveToFirst()) {
+                return cursor.getLong(0);
+            }
+            return 1; // Default to queue id 1 if none active
+        }
+    }
+
+    public void setTagFiltersForQueue(long queueId, Set<String> tags) {
+        Log.d("QueueFilter", "Setting tag filters for queue " + queueId + ": " + tags);
+
+        // Remove existing filters for this queue
+        int deleted = db.delete(TABLE_NAME_TAG_FILTER, KEY_QUEUE_NAME_ID + "=?", new String[]{String.valueOf(queueId)});
+        Log.d("QueueFilter", "Deleted " + deleted + " existing filters");
+
+        // Add new filters
+        for (String tag : tags) {
+            ContentValues values = new ContentValues();
+            values.put(KEY_QUEUE_NAME_ID, queueId);
+            values.put(KEY_TAG_NAME, tag);
+            long result = db.insert(TABLE_NAME_TAG_FILTER, null, values);
+            Log.d("QueueFilter", "Inserted tag '" + tag + "' with result: " + result);
+        }
+
+        Log.d("QueueFilter", "Final tag count for queue " + queueId + ": " + tags.size());
+    }
+
+    public Set<String> getTagFiltersForQueue(long queueId) {
+        Set<String> tags = new HashSet<>();
+        try (Cursor cursor = db.query(TABLE_NAME_TAG_FILTER, new String[]{KEY_TAG_NAME},
+                KEY_QUEUE_NAME_ID + "=?", new String[]{String.valueOf(queueId)}, null, null, null)) {
+            while (cursor.moveToNext()) {
+                tags.add(cursor.getString(0));
+            }
+        }
+        return tags;
     }
 
     public Cursor getNextInQueue(final FeedItem item) {
@@ -1079,9 +1196,38 @@ public class PodDBAdapter {
                 + " WHERE Queue.ID > (SELECT Queue.ID FROM Queue WHERE Queue.FeedItem = "
                 +  item.getId()
                 + ")"
+                + getNextInQueueFilterClause()
                 + " ORDER BY Queue.ID"
                 + " LIMIT 1";
         return db.rawQuery(query, null);
+    }
+
+    private String getNextInQueueFilterClause() {
+        // Check if active queue has tag filters
+        long activeQueueId = getActiveQueueId();
+        Set<String> tagFilters = getTagFiltersForQueue(activeQueueId);
+
+        StringBuilder filterClause = new StringBuilder();
+
+        // Only add tag filters if any - don't modify Queue table
+        if (!tagFilters.isEmpty()) {
+            filterClause.append(" AND " + TABLE_NAME_FEED_ITEMS + "." + KEY_FEED + " IN (");
+            filterClause.append("SELECT " + KEY_ID + " FROM " + TABLE_NAME_FEEDS + " WHERE ");
+
+            boolean first = true;
+            for (String tag : tagFilters) {
+                if (!first) filterClause.append(" OR ");  // Back to OR logic
+                filterClause.append("(");
+                filterClause.append(KEY_FEED_TAGS + " LIKE '%" + tag + "%'");
+                filterClause.append(" OR " + KEY_FEED_TAGS + " LIKE '%\"" + tag + "\"%'");
+                filterClause.append(" OR " + KEY_FEED_TAGS + " LIKE '%[" + tag + "]%'");
+                filterClause.append(")");
+                first = false;
+            }
+            filterClause.append(")");
+        }
+
+        return filterClause.toString();
     }
 
     public final Cursor getPausedQueueCursor(int limit) {
@@ -1542,6 +1688,8 @@ public class PodDBAdapter {
             db.execSQL(CREATE_TABLE_FEED_MEDIA);
             db.execSQL(CREATE_TABLE_DOWNLOAD_LOG);
             db.execSQL(CREATE_TABLE_QUEUE);
+            db.execSQL(CREATE_TABLE_QUEUE_NAME_LIST);
+            db.execSQL(CREATE_TABLE_TAG_FILTER);
             db.execSQL(CREATE_TABLE_SIMPLECHAPTERS);
             db.execSQL(CREATE_TABLE_FAVORITES);
 

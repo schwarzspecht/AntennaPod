@@ -355,6 +355,30 @@ class DBUpgrader {
             db.execSQL("DELETE FROM " + PodDBAdapter.TABLE_NAME_FAVORITES + " WHERE " + PodDBAdapter.KEY_FEEDITEM
                     + " NOT IN (SELECT " + PodDBAdapter.KEY_ID + " FROM " + PodDBAdapter.TABLE_NAME_FEED_ITEMS + ")");
         }
+        if (oldVersion < 3080001) {
+            // Create normalized queue system tables
+            db.execSQL("CREATE TABLE " + PodDBAdapter.TABLE_NAME_QUEUE_NAME_LIST + "(" 
+                    + PodDBAdapter.KEY_ID + " INTEGER PRIMARY KEY,"
+                    + PodDBAdapter.KEY_NAME + " TEXT," 
+                    + PodDBAdapter.KEY_IS_ACTIVE + " INTEGER DEFAULT 0," 
+                    + PodDBAdapter.KEY_CREATED_DATE + " INTEGER)");
+            
+            db.execSQL("CREATE TABLE " + PodDBAdapter.TABLE_NAME_TAG_FILTER + "(" 
+                    + PodDBAdapter.KEY_ID + " INTEGER PRIMARY KEY,"
+                    + PodDBAdapter.KEY_QUEUE_NAME_ID + " INTEGER," 
+                    + PodDBAdapter.KEY_TAG_NAME + " TEXT,"
+                    + "FOREIGN KEY(" + PodDBAdapter.KEY_QUEUE_NAME_ID + ") REFERENCES " 
+                    + PodDBAdapter.TABLE_NAME_QUEUE_NAME_LIST + "(" + PodDBAdapter.KEY_ID + "))");
+            
+            // Create default "All Episodes" queue
+            db.execSQL("INSERT INTO " + PodDBAdapter.TABLE_NAME_QUEUE_NAME_LIST + " (" 
+                    + PodDBAdapter.KEY_NAME + ", " + PodDBAdapter.KEY_IS_ACTIVE + ", " + PodDBAdapter.KEY_CREATED_DATE 
+                    + ") VALUES ('All Episodes', 1, " + System.currentTimeMillis() + ")");
+            
+            // Add queue_name_id column to existing Queue table
+            db.execSQL("ALTER TABLE " + PodDBAdapter.TABLE_NAME_QUEUE 
+                    + " ADD COLUMN " + PodDBAdapter.KEY_QUEUE_NAME_ID + " INTEGER DEFAULT 1");
+        }
     }
 
 }

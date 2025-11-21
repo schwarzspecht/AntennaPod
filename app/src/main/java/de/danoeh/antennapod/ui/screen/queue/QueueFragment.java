@@ -4,17 +4,22 @@ import android.content.Context;
 import android.content.DialogInterface;
 import android.content.SharedPreferences;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
 import android.view.ContextMenu;
 import android.view.KeyEvent;
+import android.view.LayoutInflater;
 import android.view.LayoutInflater;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.CheckBox;
+import android.widget.PopupMenu;
 import android.widget.ProgressBar;
 import android.widget.TextView;
+import android.widget.LinearLayout;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
@@ -39,8 +44,14 @@ import org.greenrobot.eventbus.EventBus;
 import org.greenrobot.eventbus.Subscribe;
 import org.greenrobot.eventbus.ThreadMode;
 
-import java.util.Collections;
+import de.danoeh.antennapod.ui.screen.queue.QueueTagFilterDialog;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Collections;
+import java.util.Map;
+import java.util.HashMap;
 
 import de.danoeh.antennapod.R;
 import de.danoeh.antennapod.activity.MainActivity;
@@ -85,6 +96,8 @@ public class QueueFragment extends Fragment implements MaterialToolbar.OnMenuIte
     private static final String SCROLL_OFFSET_KEY = "scroll_offset";
 
     private TextView infoBar;
+    private LinearLayout tagFilterContainer;
+    private com.google.android.material.chip.ChipGroup tagFilterChips;
     private EpisodeItemListRecyclerView recyclerView;
     private QueueRecyclerAdapter recyclerAdapter;
     private EmptyViewHandler emptyView;
@@ -93,6 +106,7 @@ public class QueueFragment extends Fragment implements MaterialToolbar.OnMenuIte
     private boolean displayUpArrow;
 
     private List<FeedItem> queue;
+    private Set<String> selectedTagFilter = new HashSet<>();
 
     private static final String PREFS = "QueueFragment";
     private static final String PREF_SHOW_LOCK_WARNING = "show_lock_warning";
@@ -293,6 +307,9 @@ public class QueueFragment extends Fragment implements MaterialToolbar.OnMenuIte
         } else if (itemId == R.id.queue_sort) {
             new QueueSortDialog().show(getChildFragmentManager().beginTransaction(), "SortDialog");
             return true;
+        } else if (itemId == R.id.filter_tags) {
+            showTagFilterDialog();
+            return true;
         } else if (itemId == R.id.refresh_item) {
             FeedUpdateManager.getInstance().runOnceOrAsk(requireContext());
             return true;
@@ -424,6 +441,12 @@ public class QueueFragment extends Fragment implements MaterialToolbar.OnMenuIte
         int paddingHorizontal = (int) (getResources().getDisplayMetrics().density * (largePadding ? 60 : 16));
         infoBar.setPadding(paddingHorizontal, 0, paddingHorizontal, 0);
 
+        tagFilterContainer = root.findViewById(R.id.tag_filter_container);
+        tagFilterChips = root.findViewById(R.id.tag_filter_chips);
+        
+        // Load active filters from database
+        loadActiveTagFilters();
+
         recyclerView = root.findViewById(R.id.recyclerView);
         RecyclerView.ItemAnimator animator = recyclerView.getItemAnimator();
         if (animator instanceof SimpleItemAnimator) {
@@ -488,6 +511,139 @@ public class QueueFragment extends Fragment implements MaterialToolbar.OnMenuIte
         return root;
     }
 
+    private void showTagFilterDialog() {
+        // Get all available tags and show dropdown
+        new Thread(() -> {
+            Set<String> allTags = DBReader.getAllTagsFromFeeds();
+            
+            new Handler(Looper.getMainLooper()).post(() -> {
+                showTagDropdown(allTags);
+            });
+        }).start();
+    }
+
+    private void showTagDropdown(Set<String> allTags) {
+        // Get episode counts for each tag
+        new Thread(() -> {
+            Map<String, Integer> tagCounts = getEpisodeCountsForTags(allTags);
+            int totalCount = DBReader.getQueue().size(); // Get total from database
+            
+            new Handler(Looper.getMainLooper()).post(() -> {
+                PopupMenu popup = new PopupMenu(getContext(), toolbar.findViewById(R.id.filter_tags));
+                
+                // Add "All" option with total count
+                popup.getMenu().add(0, 0, 0, "All (" + totalCount + ")");
+                
+                // Add tag options with counts
+                int id = 1;
+                for (String tag : allTags) {
+                    int count = tagCounts.getOrDefault(tag, 0);
+                    popup.getMenu().add(0, id++, 0, tag + " (" + count + ")");
+                }
+                
+                popup.setOnMenuItemClickListener(item -> {
+                    if (item.getItemId() == 0) {
+                        // "All" selected - clear filters
+                        selectedTagFilter.clear();
+                    } else {
+                        // Tag selected - extract tag name (remove count)
+                        String title = item.getTitle().toString();
+                        String tagName = title.substring(0, title.lastIndexOf(" ("));
+                        selectedTagFilter.clear();
+                        selectedTagFilter.add(tagName);
+                    }
+                    applyTagFilter(selectedTagFilter);
+                    return true;
+                });
+                
+                popup.show();
+            });
+        }).start();
+    }
+
+    private Map<String, Integer> getEpisodeCountsForTags(Set<String> tags) {
+        Map<String, Integer> counts = new HashMap<>();
+        List<FeedItem> allQueueItems = DBReader.getQueue(); // Get from database
+        
+        for (String tag : tags) {
+            int count = 0;
+            for (FeedItem item : allQueueItems) {
+                if (item.getFeed() != null) {
+                    // Check if feed has this tag
+                    Set<String> feedTags = item.getFeed().getPreferences().getTags();
+                    if (feedTags != null && feedTags.contains(tag)) {
+                        count++;
+                    }
+                }
+            }
+            counts.put(tag, count);
+        }
+        return counts;
+    }
+
+    private void loadActiveTagFilters() {
+        // Load current tag filters from database in background thread
+        new Thread(() -> {
+            Set<String> filters = DBReader.getTagFiltersForActiveQueue();
+            
+            // Update UI on main thread
+            new Handler(Looper.getMainLooper()).post(() -> {
+                selectedTagFilter = filters;
+                updateFilterIcon();
+                updateTagFilterChips();
+            });
+        }).start();
+    }
+
+    private void applyTagFilter(Set<String> selectedTags) {
+        selectedTagFilter = new HashSet<>(selectedTags);
+        // Always store the current selection in database (empty set clears filters)
+        DBWriter.setTagFiltersForActiveQueue(selectedTags);
+        updateFilterIcon();
+        updateTagFilterChips();
+        loadItems(); // Reload from database with new filters
+    }
+
+    private void updateFilterIcon() {
+        MenuItem filterItem = toolbar.getMenu().findItem(R.id.filter_tags);
+        if (filterItem != null) {
+            if (selectedTagFilter.isEmpty()) {
+                filterItem.setIcon(R.drawable.ic_filter);
+            } else {
+                filterItem.setIcon(R.drawable.ic_filter_white);
+            }
+        }
+    }
+
+    private void updateTagFilterChips() {
+        if (selectedTagFilter.isEmpty()) {
+            // Show "All" chip when no filter is active
+            tagFilterContainer.setVisibility(View.VISIBLE);
+            tagFilterChips.removeAllViews();
+            
+            com.google.android.material.chip.Chip allChip = new com.google.android.material.chip.Chip(getContext());
+            allChip.setText("All");
+            allChip.setOnClickListener(v -> showTagFilterDialog());
+            tagFilterChips.addView(allChip);
+        } else {
+            // Show selected tag chip
+            tagFilterContainer.setVisibility(View.VISIBLE);
+            tagFilterChips.removeAllViews();
+
+            for (String tag : selectedTagFilter) {
+                com.google.android.material.chip.Chip chip = new com.google.android.material.chip.Chip(getContext());
+                chip.setText(tag);
+                chip.setCloseIconVisible(true);
+                chip.setOnCloseIconClickListener(v -> {
+                    selectedTagFilter.clear();
+                    applyTagFilter(selectedTagFilter);
+                });
+                chip.setOnClickListener(v -> showTagFilterDialog());
+                tagFilterChips.addView(chip);
+            }
+        }
+    }
+
     @Override
     public void onSaveInstanceState(@NonNull Bundle outState) {
         outState.putBoolean(KEY_UP_ARROW, displayUpArrow);
@@ -531,7 +687,7 @@ public class QueueFragment extends Fragment implements MaterialToolbar.OnMenuIte
         }
         disposable = Observable.fromCallable(() -> {
             boolean displayGoToInboxButton = DBReader.getTotalEpisodeCount(new FeedItemFilter(FeedItemFilter.NEW)) > 0;
-            return new Pair<>(DBReader.getQueue(), displayGoToInboxButton);
+            return new Pair<>(DBReader.getFilteredQueue(), displayGoToInboxButton);
         })
                 .subscribeOn(Schedulers.io())
                 .observeOn(AndroidSchedulers.mainThread())
@@ -554,6 +710,8 @@ public class QueueFragment extends Fragment implements MaterialToolbar.OnMenuIte
                         recyclerView.restoreScrollPosition(scrollPosition);
                     }
                     refreshInfoBar();
+                    updateFilterIcon();
+                    updateTagFilterChips();
                 }, error -> Log.e(TAG, Log.getStackTraceString(error)));
     }
 

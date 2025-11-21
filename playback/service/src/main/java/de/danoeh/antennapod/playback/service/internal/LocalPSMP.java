@@ -711,27 +711,35 @@ public class LocalPSMP extends PlaybackServiceMediaPlayer {
             // Load next episode if previous episode was in the queue and if there
             // is an episode in the queue left.
             // Start playback immediately if continuous playback is enabled
-            nextMedia = callback.getNextInQueue(currentMedia);
-            if (nextMedia != null) {
-                callback.onPlaybackEnded(nextMedia.getMediaType(), false);
-                // setting media to null signals to playMediaObject() that
-                // we're taking care of post-playback processing
-                media = null;
-                playMediaObject(nextMedia, false, !nextMedia.localFileAvailable(), isPlaying, isPlaying);
-            } else if (wasSkipped) {
-                EventBus.getDefault().post(new MessageEvent(context.getString(R.string.no_following_in_queue)));
-            }
-        }
-        if (shouldContinue || toStoppedState) {
-            if (nextMedia == null) {
-                callback.onPlaybackEnded(null, true);
-                stop();
-            }
-            final boolean hasNext = nextMedia != null;
 
-            callback.onPostPlayback(currentMedia, hasEnded, wasSkipped, hasNext);
+            // Run database query in background thread to avoid main thread violation
+            new Thread(() -> {
+                Playable nextMediaAsync = callback.getNextInQueue(currentMedia);
+
+                // Switch back to main thread for UI updates
+                new Handler(Looper.getMainLooper()).post(() -> {
+                    if (nextMediaAsync != null) {
+                        callback.onPlaybackEnded(nextMediaAsync.getMediaType(), false);
+                        // setting media to null signals to playMediaObject() that
+                        // we're taking care of post-playback processing
+                        media = null;
+                        playMediaObject(nextMediaAsync, false, !nextMediaAsync.localFileAvailable(), isPlaying, isPlaying);
+                        callback.onPostPlayback(currentMedia, hasEnded, wasSkipped, true);
+                    } else {
+                        // No next media found
+                        if (toStoppedState) {
+                            callback.onPlaybackEnded(null, true);
+                            stop();
+                        }
+                        callback.onPostPlayback(currentMedia, hasEnded, wasSkipped, false);
+                    }
+                });
+            }).start();
+        } else if (toStoppedState) {
+            callback.onPlaybackEnded(null, true);
+            stop();
+            callback.onPostPlayback(currentMedia, hasEnded, wasSkipped, false);
         } else if (isPlaying) {
-            callback.onPlaybackPause(currentMedia, currentMedia.getPosition());
         }
     }
 

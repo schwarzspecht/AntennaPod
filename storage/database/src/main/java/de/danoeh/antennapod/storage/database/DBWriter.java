@@ -492,7 +492,7 @@ public class DBWriter {
         }
         final PodDBAdapter adapter = PodDBAdapter.getInstance();
         adapter.open();
-        final List<FeedItem> queue = DBReader.getQueue();
+        final List<FeedItem> queue = DBReader.getFilteredQueue();
 
         boolean queueModified = false;
         List<QueueEvent> events = new ArrayList<>();
@@ -1003,6 +1003,19 @@ public class DBWriter {
         } else {
             Log.w(TAG, "removeFeedWithDownloadUrl: Could not find feed with url: " + downloadUrl);
         }
+    }
+
+    public static Future<?> setTagFiltersForActiveQueue(Set<String> tags) {
+        return runOnDbThread(() -> {
+            PodDBAdapter adapter = PodDBAdapter.getInstance();
+            adapter.open();
+            try {
+                long activeQueueId = adapter.getActiveQueueId();
+                adapter.setTagFiltersForQueue(activeQueueId, tags);
+            } finally {
+                adapter.close();
+            }
+        });
     }
 
     /**
